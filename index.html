@@ -34,7 +34,10 @@
             <div class="task" id="t_front">请保持正脸平视屏幕，扫描中...</div>
         </div>
         <button id="start_btn" disabled>请稍候...</button>
+
+        <button id="flip_btn" style="background: #6c757d; color: #fff; margin-top: 10px;">切换前后摄像头</button>
         <button id="view_btn">查看 3D 精准模型</button>
+        <button id="reset_btn" style="background: #dc3545; color: #fff; margin-top: 10px; display: none;">重新扫描</button>
     </div>
 
     <script type="module">
@@ -44,13 +47,15 @@
         const instruction = document.getElementById('instruction');
         const startBtn = document.getElementById('start_btn');
         const viewBtn = document.getElementById('view_btn');
+        const resetBtn = document.getElementById('reset_btn');
+
 
         let scanPhase = 'idle', poseStartTime = 0, faceData = null, cameraAspect = 1.0;
-        const LOCK_TIME = 3000; 
+        const LOCK_TIME = 1500; 
         let textures = { front:null };
 
         const phases = ['front'];
-        const phasePrompts = { front: "请保持正脸平视，正在采集数据..." };
+        const phasePrompts = { front: "正在采集数据..." };
 
         function speak(t) {
             window.speechSynthesis.cancel();
@@ -86,15 +91,17 @@
             cameraAspect = h / w;
             canvasElement.width = w; canvasElement.height = h;
             canvasCtx.save();
-            canvasCtx.translate(w, 0); canvasCtx.scale(-1, 1);
+            if (currentFacingMode === 'user') {
+                canvasCtx.translate(w, 0); canvasCtx.scale(-1, 1);
+            }
             canvasCtx.drawImage(res.image, 0, 0, w, h);
             canvasCtx.restore();
 
             if (res.multiFaceLandmarks && res.multiFaceLandmarks[0]) {
                 const face = res.multiFaceLandmarks[0];
                 if (scanPhase === 'idle') {
-                    startBtn.disabled = false; startBtn.innerText = "开始精确扫描";
-                    instruction.innerText = "准备好后点击下方按钮"; return;
+                    startBtn.disabled = false; startBtn.innerText = "开始扫描";
+                    instruction.innerText = "请将脸部对准屏幕"; return;
                 }
 
                 if (scanPhase === 'front') {
@@ -109,6 +116,7 @@
                         document.getElementById('t_front').className = 'task done';
                         scanPhase = 'done'; speak("扫描完成"); instruction.innerText = "可以生成模型了";
                         viewBtn.style.display = 'block';
+                        resetBtn.style.display = 'block';
                     }
                 }
             }
@@ -117,18 +125,53 @@
         function captureFrame(res, w, h) {
             const c = document.createElement('canvas'); c.width = w; c.height = h;
             const ctx = c.getContext('2d');
-            ctx.translate(w, 0); ctx.scale(-1, 1);
+            if (currentFacingMode === 'user') {
+                ctx.translate(w, 0); ctx.scale(-1, 1);
+            }
             ctx.drawImage(res.image, 0, 0, w, h);
             return c.toDataURL('image/jpeg', 0.95);
         }
 
-        const camera = new Camera(videoElement, { onFrame: async () => { await faceMesh.send({image: videoElement}); }, width: 1280, height: 720 });
-        camera.start();
+        let currentFacingMode = 'environment';
+        let camera;
+
+        function startCamera() {
+            if (camera) camera.stop();
+            camera = new Camera(videoElement, {
+                onFrame: async () => { await faceMesh.send({image: videoElement}); },
+                width: 1280,
+                height: 720,
+                facingMode: currentFacingMode
+            });
+            camera.start();
+        }
+
+        startCamera();
 
         startBtn.onclick = () => {
             scanPhase = 'front'; startBtn.style.display = 'none';
             document.getElementById('t_front').className = 'task active';
             speak(phasePrompts.front);
+        };
+
+
+
+        document.getElementById('flip_btn').onclick = () => {
+            currentFacingMode = currentFacingMode === 'user' ? 'environment' : 'user';
+            startCamera();
+        };
+
+        resetBtn.onclick = () => {
+            scanPhase = 'idle';
+            poseStartTime = 0;
+            faceData = null;
+            textures.front = null;
+            document.getElementById('t_front').className = 'task';
+            instruction.innerText = "准备好后点击下方按钮";
+            startBtn.style.display = 'block';
+            startBtn.disabled = false;
+            viewBtn.style.display = 'none';
+            resetBtn.style.display = 'none';
         };
 
         viewBtn.onclick = () => {
@@ -156,7 +199,7 @@
                         const geo = new THREE.BufferGeometry();
                         const pos = [], uv = [], pts2d = [];
                         data.forEach(p => {
-                            pos.push((0.5-p.x)*3, (0.5-p.y)*3*aspect, -p.z*3);
+                            pos.push((0.5-p.x)*3, (0.5-p.y)*3*aspect, p.z*3);
                             uv.push(1-p.x, 1-p.y); pts2d.push([p.x, p.y]);
                         });
                         geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
