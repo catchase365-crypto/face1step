@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XR 高清耳部扫描仪 (90°侧面精确版)</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils"></script>
+    <style>
+        body { font-family: -apple-system, sans-serif; margin: 0; background: #fff; display: flex; flex-direction: column; align-items: center; }
+        #container { position: relative; width: 100vw; height: 50vh; background: #000; overflow: hidden; }
+        video { display: none; }
+        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; }
+        .dashboard { width: 95%; max-width: 450px; padding: 20px; text-align: center; }
+        #instruction { font-size: 22px; font-weight: bold; color: #007bff; margin: 15px 0; height: 60px; display: flex; align-items: center; justify-content: center; }
+        .task-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 20px; }
+        .task { font-size: 11px; opacity: 0.2; transition: 0.3s; padding: 5px; border: 1px solid #ddd; border-radius: 6px; background: #f9f9f9; }
+        .task.active { opacity: 1; border-color: #007bff; background: #e7f3ff; font-weight: bold; }
+        .task.done { opacity: 1; background: #d4edda; border-color: #28a745; color: #155724; }
+        button { width: 100%; padding: 18px; font-size: 18px; border-radius: 15px; border: none; font-weight: bold; cursor: pointer; }
+        #start_btn { background: #007bff; color: #fff; }
+        #view_btn { background: #28a745; color: #fff; display: none; }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <video id="input_video" playsinline></video>
+        <canvas id="output_canvas"></canvas>
+    </div>
+    <div class="dashboard">
+        <div id="instruction">神经网络加载中...</div>
+        <div class="task-grid" style="grid-template-columns: repeat(1, 1fr);">
+            <div class="task" id="t_front">请保持正脸平视屏幕，扫描中...</div>
+        </div>
+        <button id="start_btn" disabled>请稍候...</button>
+        <button id="view_btn">查看 3D 精准模型</button>
+    </div>
+
+    <script type="module">
+        const videoElement = document.getElementById('input_video');
+        const canvasElement = document.getElementById('output_canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const instruction = document.getElementById('instruction');
+        const startBtn = document.getElementById('start_btn');
+        const viewBtn = document.getElementById('view_btn');
+
+        let scanPhase = 'idle', poseStartTime = 0, faceData = null, cameraAspect = 1.0;
+        const LOCK_TIME = 3000; 
+        let textures = { front:null };
+
+        const phases = ['front'];
+        const phasePrompts = { front: "请保持正脸平视，正在采集数据..." };
+
+        function speak(t) {
+            window.speechSynthesis.cancel();
+            const m = new SpeechSynthesisUtterance(t);
+            m.lang = 'zh-CN';
+            window.speechSynthesis.speak(m);
+        }
+
+        const faceMesh = new FaceMesh({locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}`});
+        faceMesh.setOptions({ maxNumFaces: 1, refineLandmarks: true, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
+
+        function getPose(landmarks) {
+            const nose = landmarks[1], left = landmarks[234], right = landmarks[454], top = landmarks[10], bot = landmarks[152];
+            const hRatio = (nose.x - left.x) / (right.x - left.x); // 0.5为正，接近0或1为侧
+            const vRatio = (nose.y - top.y) / (bot.y - top.y);
+            
+            if (vRatio < 0.35) return 'up';
+            if (vRatio > 0.65) return 'down';
+            
+            // 精确侧向判定
+            if (hRatio > 0.85) return 'left90'; 
+            if (hRatio > 0.65) return 'left45';
+            if (hRatio < 0.15) return 'right90';
+            if (hRatio < 0.35) return 'right45';
+            
+            if (hRatio > 0.4 && hRatio < 0.6) return 'front';
+            return 'transition';
+        }
+
+        faceMesh.onResults((res) => {
+            const w = videoElement.videoWidth, h = videoElement.videoHeight;
+            if (!w) return;
+            cameraAspect = h / w;
+            canvasElement.width = w; canvasElement.height = h;
+            canvasCtx.save();
+            canvasCtx.translate(w, 0); canvasCtx.scale(-1, 1);
+            canvasCtx.drawImage(res.image, 0, 0, w, h);
+            canvasCtx.restore();
+
+            if (res.multiFaceLandmarks && res.multiFaceLandmarks[0]) {
+                const face = res.multiFaceLandmarks[0];
+                if (scanPhase === 'idle') {
+                    startBtn.disabled = false; startBtn.innerText = "开始精确扫描";
+                    instruction.innerText = "准备好后点击下方按钮"; return;
+                }
+
+                if (scanPhase === 'front') {
+                    if (!poseStartTime) { poseStartTime = Date.now(); }
+                    const elapsed = Date.now() - poseStartTime;
+                    const remaining = Math.ceil((LOCK_TIME - elapsed) / 1000);
+                    if (remaining > 0) {
+                        instruction.innerText = `正在处理数据... ${remaining}`;
+                    } else {
+                        textures.front = captureFrame(res, w, h);
+                        faceData = face.map(p => ({x:p.x, y:p.y, z:p.z}));
+                        document.getElementById('t_front').className = 'task done';
+                        scanPhase = 'done'; speak("扫描完成"); instruction.innerText = "可以生成模型了";
+                        viewBtn.style.display = 'block';
+                    }
+                }
+            }
+        });
+
+        function captureFrame(res, w, h) {
+            const c = document.createElement('canvas'); c.width = w; c.height = h;
+            const ctx = c.getContext('2d');
+            ctx.translate(w, 0); ctx.scale(-1, 1);
+            ctx.drawImage(res.image, 0, 0, w, h);
+            return c.toDataURL('image/jpeg', 0.95);
+        }
+
+        const camera = new Camera(videoElement, { onFrame: async () => { await faceMesh.send({image: videoElement}); }, width: 1280, height: 720 });
+        camera.start();
+
+        startBtn.onclick = () => {
+            scanPhase = 'front'; startBtn.style.display = 'none';
+            document.getElementById('t_front').className = 'task active';
+            speak(phasePrompts.front);
+        };
+
+        viewBtn.onclick = () => {
+            sessionStorage.setItem('faceData', JSON.stringify(faceData));
+            sessionStorage.setItem('textures', JSON.stringify(textures));
+            sessionStorage.setItem('aspect', cameraAspect);
+            const win = window.open('', '_blank');
+            win.document.write(`
+                <html>
+                <head><title>3D 精准耳朵模型预览</title><script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"><\/script>
+                <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"><\/script>
+                <script src="https://cdn.jsdelivr.net/npm/delaunator@5.0.0/delaunator.min.js"><\/script></head>
+                <body style="margin:0; background:#000;">
+                    <script>
+                        const data = JSON.parse(sessionStorage.getItem('faceData'));
+                        const texs = JSON.parse(sessionStorage.getItem('textures'));
+                        const aspect = parseFloat(sessionStorage.getItem('aspect'));
+                        const scene = new THREE.Scene();
+                        const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.1, 100);
+                        const renderer = new THREE.WebGLRenderer({antialias:true});
+                        renderer.setSize(window.innerWidth, window.innerHeight);
+                        document.body.appendChild(renderer.domElement);
+                        new THREE.OrbitControls(camera, renderer.domElement);
+
+                        const geo = new THREE.BufferGeometry();
+                        const pos = [], uv = [], pts2d = [];
+                        data.forEach(p => {
+                            pos.push((0.5-p.x)*3, (0.5-p.y)*3*aspect, -p.z*3);
+                            uv.push(1-p.x, 1-p.y); pts2d.push([p.x, p.y]);
+                        });
+                        geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+                        geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+                        geo.setIndex(new THREE.BufferAttribute(new Uint32Array(Delaunator.from(pts2d).triangles), 1));
+                        geo.computeVertexNormals();
+
+                        const loader = new THREE.TextureLoader();
+                        const material = new THREE.ShaderMaterial({
+                            uniforms: {
+                                tF: { value: loader.load(texs.front) }
+                            },
+                            vertexShader: "varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }",
+                            fragmentShader: "uniform sampler2D tF; varying vec2 vUv; void main() { gl_FragColor = texture2D(tF, vUv); }",
+                            side: THREE.DoubleSide
+                        });
+                        scene.add(new THREE.Mesh(geo, material));
+                        camera.position.z = 2;
+                        function anim() { requestAnimationFrame(anim); renderer.render(scene, camera); }
+                        anim();
+                    <\/script>
+                </body></html>
+            `);
+            win.document.close();
+        };
+    </script>
+</body>
+</html>
